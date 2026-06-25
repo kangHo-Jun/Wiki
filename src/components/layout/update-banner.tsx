@@ -1,10 +1,8 @@
 import { useCallback } from "react"
-import { Sparkles, X, Download } from "lucide-react"
+import { Sparkles, X } from "lucide-react"
 import { useTranslation } from "react-i18next"
-import { openUrl } from "@tauri-apps/plugin-opener"
 import { useUpdateStore, shouldShowUpdateBanner } from "@/stores/update-store"
 import { saveUpdateCheckState } from "@/lib/project-store"
-import { toLatestReleaseUrl } from "@/lib/update-check"
 
 /**
  * App-wide update-available banner.
@@ -31,21 +29,6 @@ export function UpdateBanner() {
   const { t } = useTranslation()
   const visible = useUpdateStore((s) => shouldShowUpdateBanner(s))
   const result = useUpdateStore((s) => s.lastResult)
-
-  const handleOpen = useCallback(async () => {
-    if (!result || result.kind !== "available") return
-    // Send the user to `/releases/latest`, NOT the tag-specific
-    // page from `release.html_url`. /latest always follows GitHub's
-    // redirect to whatever is currently the most recent release —
-    // robust to (a) a newer release shipping between notification
-    // and click, and (b) the bare `/releases` listing's default
-    // sort not putting newest at the top.
-    try {
-      await openUrl(toLatestReleaseUrl(result.release.html_url))
-    } catch (err) {
-      console.error("[update-banner] openUrl failed:", err)
-    }
-  }, [result])
 
   const handleDismiss = useCallback(async () => {
     if (!result || result.kind !== "available") return
@@ -89,14 +72,6 @@ export function UpdateBanner() {
           })}
         </span>
       </div>
-      <button
-        type="button"
-        onClick={handleOpen}
-        className="inline-flex shrink-0 items-center gap-1.5 rounded-md bg-primary px-3 py-1 text-xs font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
-      >
-        <Download className="h-3.5 w-3.5" />
-        {t("updateBanner.openDownload", { defaultValue: "Open download page" })}
-      </button>
       <button
         type="button"
         onClick={handleDismiss}
