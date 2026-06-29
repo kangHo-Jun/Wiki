@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback } from "react"
-import { Download, RefreshCw, CheckCircle2, Sparkles } from "lucide-react"
+import { RefreshCw, CheckCircle2, Sparkles } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { openUrl } from "@tauri-apps/plugin-opener"
 import { apiServerStatus, clipServerStatus } from "@/commands/fs"
 import { Button } from "@/components/ui/button"
 import { API_SERVER_HEALTH_URL, API_SERVER_PORT } from "@/lib/api-server-constants"
 import { useUpdateStore, hasAvailableUpdate } from "@/stores/update-store"
-import { checkForUpdates, toLatestReleaseUrl } from "@/lib/update-check"
+import { checkForUpdates } from "@/lib/update-check"
 import { saveUpdateCheckState } from "@/lib/project-store"
 
 interface ApiHealth {
@@ -67,17 +67,6 @@ export function AboutSection() {
       enabled: useUpdateStore.getState().enabled,
       lastCheckedAt: now,
       dismissedVersion: null,
-    })
-  }, [])
-
-  const handleDismiss = useCallback(async () => {
-    const result = useUpdateStore.getState().lastResult
-    if (result?.kind !== "available") return
-    useUpdateStore.getState().setDismissed(result.remote)
-    await saveUpdateCheckState({
-      enabled: useUpdateStore.getState().enabled,
-      lastCheckedAt: useUpdateStore.getState().lastCheckedAt ?? Date.now(),
-      dismissedVersion: result.remote,
     })
   }, [])
 
@@ -173,10 +162,8 @@ export function AboutSection() {
         {showAvailable && updateStore.lastResult?.kind === "available" && (
           <UpdateAvailableBanner
             remote={updateStore.lastResult.remote}
-            releaseUrl={updateStore.lastResult.release.html_url}
             releaseName={updateStore.lastResult.release.name}
             releaseBody={updateStore.lastResult.release.body}
-            onDismiss={handleDismiss}
           />
         )}
 
@@ -207,27 +194,21 @@ export function AboutSection() {
       <div className="rounded-md border p-4 text-sm">
         <div className="font-medium">LLM Wiki</div>
         <p className="mt-1 text-xs text-muted-foreground">
-          {t("settings.sections.about.appDescription")}
-          {" "}
-          {/*
-           * Tauri 2's webview doesn't honor `target="_blank"` for
-           * external URLs by default — clicking would either do
-           * nothing or replace the in-app webview with the github
-           * page (terrible UX). Route through the opener plugin
-           * via onClick + preventDefault so it always lands in the
-           * system browser.
-           */}
+          An LLM-driven personal knowledge base.
+        </p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          (주)대산{" "}
           <a
             className="cursor-pointer underline underline-offset-2 hover:text-primary"
-            href="https://github.com/nashsu/llm_wiki"
+            href="https://daesan.ai"
             onClick={(e) => {
               e.preventDefault()
-              void openUrl("https://github.com/nashsu/llm_wiki").catch((err) => {
+              void openUrl("https://daesan.ai").catch((err) => {
                 console.error("[about] openUrl failed:", err)
               })
             }}
           >
-            github.com/nashsu/llm_wiki
+            daesan.ai
           </a>
         </p>
       </div>
@@ -237,51 +218,16 @@ export function AboutSection() {
 
 interface UpdateAvailableBannerProps {
   remote: string
-  releaseUrl: string
   releaseName: string
   releaseBody: string
-  onDismiss: () => void
 }
 
 function UpdateAvailableBanner({
   remote,
-  releaseUrl,
   releaseName,
   releaseBody,
-  onDismiss,
 }: UpdateAvailableBannerProps) {
   const { t } = useTranslation()
-  // Use `/releases/latest` (canonical GitHub redirect to the newest
-  // release) rather than the tag-specific URL from the release
-  // payload. Same rationale as in the top banner — see
-  // `toLatestReleaseUrl` for details.
-  const targetUrl = toLatestReleaseUrl(releaseUrl)
-  const handleOpen = async () => {
-    // Tauri 2's webview does NOT auto-delegate `window.open()` to the
-    // system browser — `tauri-plugin-opener` is the official way to
-    // launch the user's default browser. The Rust plugin is
-    // registered in `src-tauri/src/lib.rs` and `opener:default`
-    // permission is granted in capabilities/default.json.
-    //
-    // Fail-soft: if the plugin call rejects (e.g. URL blocked by a
-    // future capability tightening), fall back to copying the URL
-    // to the clipboard so the user can paste it into a browser
-    // manually instead of seeing a silently broken button.
-    try {
-      await openUrl(targetUrl)
-    } catch (err) {
-      console.error("[update-banner] openUrl failed:", err)
-      try {
-        await navigator.clipboard.writeText(targetUrl)
-        // eslint-disable-next-line no-alert
-        alert(`Could not open browser. URL copied to clipboard:\n${targetUrl}`)
-      } catch {
-        // eslint-disable-next-line no-alert
-        alert(`Could not open browser. Visit:\n${targetUrl}`)
-      }
-    }
-  }
-
   const preview = releaseBody.slice(0, 400)
   const truncated = releaseBody.length > preview.length
 
@@ -300,15 +246,6 @@ function UpdateAvailableBanner({
           {truncated && " …"}
         </pre>
       )}
-      <div className="mt-3 flex items-center gap-2">
-        <Button size="sm" onClick={handleOpen} className="gap-1.5">
-          <Download className="h-3.5 w-3.5" />
-          {t("settings.sections.about.openDownload")}
-        </Button>
-        <Button size="sm" variant="ghost" onClick={onDismiss}>
-          {t("settings.sections.about.later")}
-        </Button>
-      </div>
     </div>
   )
 }
