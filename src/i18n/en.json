@@ -53,7 +53,7 @@
     }
   },
   "project": {
-    "createTitle": "Create New Wiki Project",
+    "createTitle": "새 위키 프로젝트 만들기 By 대산AI",
     "name": "Project Name",
     "namePlaceholder": "my-research-wiki",
     "parentDir": "Parent Directory",
@@ -68,7 +68,7 @@
     "requiredMarker": "*",
     "browse": "Select Parent Directory",
     "aiOutputLanguage": "AI Output Language",
-    "aiOutputLanguageHint": "All AI-generated content (wiki pages, chat replies, research output) will use this language. You can change it later in Settings → Output.",
+    "aiOutputLanguageHint": "AI가 생성하는 모든 콘텐츠(위키 페이지, 채팅 답변, 리서치 결과물)는 이 언어로 작성됩니다. Settings에서 변경할 수 있습니다.",
     "pickLanguage": "Pick a language…"
   },
   "templates": {

@@ -51,12 +51,11 @@ export function CreateProjectDialog({ open: isOpen, onOpenChange, onCreated }: C
   const [name, setName] = useState("")
   const [path, setPath] = useState("")
   const [selectedTemplate, setSelectedTemplate] = useState("general")
-  // Empty string = "user hasn't picked yet"; we validate this on
-  // submit so a fresh project never starts in implicit auto-detect
-  // mode. Once chosen, the value is one of OUTPUT_LANGUAGE_OPTIONS
+  // Default to Korean so new projects start in Korean by default.
+  // Once chosen, the value is one of OUTPUT_LANGUAGE_OPTIONS
   // (`auto` is a valid explicit choice — the user is then opting
   // INTO auto-detect rather than getting it by accident).
-  const [language, setLanguage] = useState<string>("")
+  const [language, setLanguage] = useState<string>("Korean")
   const [error, setError] = useState("")
   const [hasInteracted, setHasInteracted] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -72,7 +71,7 @@ export function CreateProjectDialog({ open: isOpen, onOpenChange, onCreated }: C
     setName("")
     setPath("")
     setSelectedTemplate("general")
-    setLanguage("")
+    setLanguage("Korean")
     setError("")
     setHasInteracted(false)
   }
