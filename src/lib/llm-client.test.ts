@@ -211,3 +211,31 @@ describe("streamChat — mid-stream abort mapping", () => {
     }
   })
 })
+
+describe("Gemini incomplete response", () => {
+  it("accepts an explicit STOP after complete content", async () => {
+    mockHttpFetch.mockResolvedValueOnce(new Response(
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "complete answer" }] }, finishReason: "STOP" }] })}\n\n`,
+      { status: 200 },
+    ))
+    const onDone = vi.fn(), onError = vi.fn(), onToken = vi.fn()
+    await streamChat({ ...cfg, provider: "google", model: "gemini-2.5-flash", apiKey: "test" }, [], { onToken, onDone, onError })
+    expect(onDone).toHaveBeenCalledOnce()
+    expect(onError).not.toHaveBeenCalled()
+    expect(onToken).toHaveBeenCalledWith("complete answer")
+  })
+  afterEach(() => vi.clearAllTimers())
+  it.each(["MAX_TOKENS", "SAFETY", undefined])("reports %s instead of completion", async (finishReason) => {
+    mockHttpFetch.mockResolvedValueOnce(new Response(
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "partial answer" }] }, finishReason }] })}\n\n`,
+      { status: 200 },
+    ))
+    const onDone = vi.fn()
+    const onError = vi.fn()
+    await streamChat({ ...cfg, provider: "google", model: "gemini-2.5-flash", apiKey: "test" }, [], {
+      onToken: vi.fn(), onDone, onError,
+    })
+    expect(onDone).not.toHaveBeenCalled()
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining(finishReason ?? "MISSING_FINISH_REASON") }))
+  })
+})
