@@ -198,6 +198,15 @@ export async function streamChat(
   // detector.ts.
   let contentCharsEmitted = 0
   let reasoningCharsObserved = 0
+  let googleFinishReason: string | undefined
+  const recordFinishReason = (line: string) => {
+    if (config.provider !== "google" || !line.startsWith("data:")) return
+    try {
+      const event = JSON.parse(line.slice(5).trim())
+      const reason = event.candidates?.[0]?.finishReason ?? event.promptFeedback?.blockReason
+      if (typeof reason === "string") googleFinishReason = reason
+    } catch { /* Non-JSON SSE control lines carry no finish reason. */ }
+  }
   const recordToken = (text: string) => {
     contentCharsEmitted += text.length
     onToken(text)
@@ -217,6 +226,7 @@ export async function streamChat(
         if (lineBuffer.trim()) {
           const trimmed = lineBuffer.trim()
           reasoningCharsObserved += countReasoningCharsInLine(trimmed)
+          recordFinishReason(trimmed)
           recordReasoning(trimmed)
           const token = providerConfig.parseStream(trimmed)
           if (token !== null) recordToken(token)
@@ -231,10 +241,16 @@ export async function streamChat(
         const trimmed = line.trim()
         if (!trimmed) continue
         reasoningCharsObserved += countReasoningCharsInLine(trimmed)
+        recordFinishReason(trimmed)
         recordReasoning(trimmed)
         const token = providerConfig.parseStream(trimmed)
         if (token !== null) recordToken(token)
       }
+    }
+
+    if (config.provider === "google" && googleFinishReason !== "STOP") {
+      onError(new Error(`Gemini response incomplete: finishReason=${googleFinishReason ?? "MISSING_FINISH_REASON"}. Reduce the requested output or split the source before retrying.`))
+      return
     }
 
     // Stream ended cleanly. If the model produced thinking tokens

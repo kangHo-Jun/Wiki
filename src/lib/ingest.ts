@@ -9,6 +9,7 @@ import {
   listDirectory,
 } from "@/commands/fs"
 import { streamChat } from "@/lib/llm-client"
+import { mergeIndexEntries } from "@/lib/index-merge"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { parseWithMineru } from "@/lib/mineru"
@@ -46,13 +47,60 @@ const LONG_SOURCE_CHUNK_MIN = 12_000
 const LONG_SOURCE_CHUNK_MAX = 60_000
 const LONG_SOURCE_DIGEST_MAX = 15_000
 const LONG_SOURCE_CHUNK_ANALYSIS_MAX = 40_000
+// Analysis output is context for generation only (never written to the
+// wiki). 4,096 was routinely exceeded by Korean analyses, and since Gemini
+// MAX_TOKENS is now a hard error every such source failed.
+const INGEST_ANALYSIS_MAX_TOKENS = 16_384
+const INGEST_CHUNK_ANALYSIS_MAX_TOKENS = 8_192
 const INGEST_GENERATION_TOKENS_DEFAULT = 8_192
 const INGEST_GENERATION_TOKENS_128K = 16_384
 const INGEST_GENERATION_TOKENS_256K = 24_576
 const INGEST_GENERATION_TOKENS_512K = 32_768
 const REVIEW_STAGE_MIN_SIGNAL_CHARS = 10_000
 const REVIEW_STAGE_MIN_FILE_BLOCKS = 4
-const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/overview.md", "wiki/log.md"] as const
+// overview.md is deliberately absent: ingest no longer regenerates it (a
+// full rewrite on every source exhausted the output budget). index.md is
+// append-merged from new entries only — see index-merge.ts.
+const AGGREGATE_WIKI_PATHS = ["wiki/index.md", "wiki/log.md"] as const
+const OVERVIEW_PATH = "wiki/overview.md"
+
+/**
+ * Keep the raw model reply when a generation is rejected, so a format
+ * failure (e.g. an unclosed FILE block) can be diagnosed afterwards.
+ * Written under the project's .llm-wiki/ingest-debug/; never throws.
+ */
+async function saveIngestDebugDump(
+  projectPath: string,
+  sourceIdentity: string,
+  generation: string,
+  warnings: string[],
+): Promise<void> {
+  try {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+    const name = getFileName(sourceIdentity).replace(/[^\p{L}\p{N}._-]+/gu, "_").slice(0, 80)
+    const body = [
+      `source: ${sourceIdentity}`,
+      `saved: ${new Date().toISOString()}`,
+      "",
+      "## Parser warnings",
+      ...warnings.map((w) => `- ${w}`),
+      "",
+      "## Raw generation",
+      generation,
+    ].join("\n")
+    await writeFile(`${normalizePath(projectPath)}/.llm-wiki/ingest-debug/${stamp}-${name}.txt`, body)
+  } catch (err) {
+    console.warn("[ingest] failed to save debug dump:", err)
+  }
+}
+
+function isOverviewPath(relativePath: string): boolean {
+  return relativePath === OVERVIEW_PATH || relativePath.endsWith("/overview.md")
+}
+
+function isIndexPath(relativePath: string): boolean {
+  return relativePath === "wiki/index.md" || relativePath.endsWith("/index.md")
+}
 
 function appendSavedImageRefsForCaption(content: string, images: SavedImage[]): string {
   if (images.length === 0) return content
@@ -820,7 +868,7 @@ async function autoIngestImpl(
         },
       },
       signal,
-      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
+      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: INGEST_ANALYSIS_MAX_TOKENS },
     )
   }
 
@@ -885,6 +933,22 @@ async function autoIngestImpl(
   const generationActivity = useActivityStore.getState().items.find((i) => i.id === activityId)
   if (generationActivity?.status === "error") {
     throw new Error(generationActivity.detail || "Generation stream failed")
+  }
+
+  // Validate the entire generation before any page writes. A dropped tail
+  // must never turn into a fallback summary and a successful cache entry.
+  const generationParse = parseFileBlocks(generation)
+  // A truncated overview block is harmless: overview is never written by ingest.
+  const truncatedBlock = generationParse.warnings.some(
+    (w) => w.includes("was not closed") && !w.includes(`"${OVERVIEW_PATH}"`),
+  )
+  if (!signal?.aborted && truncatedBlock) {
+    await saveIngestDebugDump(pp, sourceIdentity, generation, generationParse.warnings)
+  }
+  if (signal?.aborted || truncatedBlock) {
+    const message = signal?.aborted ? "Ingest cancelled" : "Incomplete generation: missing or truncated FILE blocks; no wiki pages were written."
+    activity.updateItem(activityId, { status: "error", detail: message })
+    throw new Error(message)
   }
 
   let reviewSuggestionOutput = ""
@@ -1105,6 +1169,17 @@ async function autoIngestImpl(
     useReviewStore.getState().addItems(reviewItems)
   }
 
+  const incompleteOutput = writeWarnings.some(
+    (w) =>
+      (w.includes("was not closed") && !w.includes(`"${OVERVIEW_PATH}"`)) ||
+      w.startsWith("Aggregate repair failed:"),
+  )
+  if (incompleteOutput || hardFailures.length > 0) {
+    const message = "Incomplete ingest: some generated files failed; partial pages were retained but no success cache was saved."
+    activity.updateItem(activityId, { status: "error", detail: message, filesWritten: [...new Set(writtenPaths)] })
+    throw new Error(message)
+  }
+
   // ── Step 5: Save to cache ───────────────────────────────────
   // Skip cache when ANY block hit a hard FS failure: we'd otherwise
   // freeze the partial-write result into the cache and a future
@@ -1285,12 +1360,14 @@ function aggregateRepairSectionCap(maxContextSize: number | undefined): number {
 
 function isAggregateRepairSafe(
   path: string,
-  index: string,
+  _index: string,
   overview: string,
   maxContextSize: number | undefined,
 ): boolean {
   const cap = aggregateRepairSectionCap(maxContextSize)
-  if (path === "wiki/index.md") return index.length <= cap
+  // Index repair emits only new entries (merged by code), so the size of
+  // the existing index no longer limits it.
+  if (path === "wiki/index.md") return true
   if (path === "wiki/overview.md") return overview.length <= cap
   return true
 }
@@ -1615,13 +1692,19 @@ async function writeFileBlocks(
         const existing = await tryReadFile(fullPath)
         const appended = existing ? `${existing}\n\n${content.trim()}` : content.trim()
         await writeFile(fullPath, appended)
+      } else if (isOverviewPath(relativePath)) {
+        // Ingest never rewrites the overview (see AGGREGATE_WIKI_PATHS).
+        // A model that emits one anyway is ignored, not treated as a failure.
+        warnings.push(`Ignored "${relativePath}" — overview is not regenerated during ingest.`)
+        continue
+      } else if (isIndexPath(relativePath)) {
+        // The model emits only new entries; merge them into the existing
+        // index instead of overwriting it.
+        const existing = await tryReadFile(fullPath)
+        await writeFile(fullPath, mergeIndexEntries(existing || "", content).content)
       } else if (
         isListingPath(relativePath)
       ) {
-        // Listing pages (index / overview) are always overwritten
-        // wholesale — their sources field is incidental and merging
-        // wouldn't make semantic sense (they aren't source-derived
-        // content pages).
         await writeFile(fullPath, content)
       } else {
         // Content pages (entities / concepts / queries / synthesis /
@@ -1838,9 +1921,9 @@ export function buildGenerationPrompt(
     `1. A source summary page at **${summaryPath}** (MUST use this exact path)`,
     "2. Entity or schema-defined typed pages for key named things identified in the analysis. Prefer schema-defined directories when present; otherwise use wiki/entities/.",
     "3. Concept or schema-defined typed pages for key ideas, methods, techniques, and abstractions. Prefer schema-defined directories when present; otherwise use wiki/concepts/.",
-    "4. An updated wiki/index.md — add new entries to existing categories, preserve all existing entries",
+    "4. A wiki/index.md block containing ONLY the new entries for pages you created in this response — never re-emit existing entries or the whole index. Put each entry under the existing `## Section` and `### Subsection` heading it belongs to (copy the heading text exactly from the Current Wiki Index), one bullet per page: `- [[page-slug]] — one-line summary`. The application appends these to the existing index.",
     "5. A log entry for wiki/log.md (just the new entry to append, format: ## [YYYY-MM-DD] ingest | Title)",
-    "6. An updated wiki/overview.md — a high-level summary of what the entire wiki covers, updated to reflect the newly ingested source. This should be a comprehensive 2-5 paragraph overview of ALL topics in the wiki, not just the new source.",
+    "Do NOT output a wiki/overview.md block. The overview is maintained separately and is not updated during ingest.",
     "",
     "## Frontmatter Rules (CRITICAL — parser is strict)",
     "",
@@ -1920,8 +2003,8 @@ export function buildGenerationPrompt(
     "  SEARCH: automated technical debt detection AI generated code | software quality metrics LLM code generation | static analysis tools agentic software development",
     "",
     purpose ? `## Wiki Purpose\n${purpose}` : "",
-    index ? `## Current Wiki Index (preserve all existing entries, add new ones)\n${index}` : "",
-    overview ? `## Current Overview (update this to reflect the new source)\n${overview}` : "",
+    index ? `## Current Wiki Index (context — reuse its headings; emit only NEW entries)\n${index}` : "",
+    overview ? `## Current Overview (context only — do not output it)\n${overview}` : "",
     "",
     // ── OUTPUT FORMAT MUST BE THE LAST SECTION — models weight recent instructions highest ──
     "## Output Format (MUST FOLLOW EXACTLY — this is how the parser reads your response)",
@@ -2052,8 +2135,7 @@ function buildAggregateRepairPrompt(
     "",
     "Rules:",
     `- Use today's date ${today} for log entries and frontmatter dates.`,
-    "- For wiki/index.md: output the complete updated index, preserving existing entries and adding the new source-derived entries.",
-    "- For wiki/overview.md: output the complete updated overview, reflecting the full wiki plus this new source.",
+    "- For wiki/index.md: output ONLY the new entries for this source under their `## Section` / `### Subsection` headings (`- [[page-slug]] — summary`). Never re-emit existing entries; the application appends them.",
     "- For wiki/log.md: output only the new log entry to append, format `## [YYYY-MM-DD] ingest | Title`.",
     "- Output only FILE blocks. Nothing else.",
     "",
@@ -2484,7 +2566,7 @@ async function analyzeLongSourceInChunks(
         },
       },
       signal,
-      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: 4096 },
+      { temperature: 0.1, reasoning: { mode: "off" }, max_tokens: INGEST_CHUNK_ANALYSIS_MAX_TOKENS },
     )
 
     if (signal?.aborted) throw new Error("Ingest cancelled")
@@ -2905,7 +2987,7 @@ export async function executeIngestWrites(
     "---END FILE---",
     "```",
     "",
-    "For wiki/log.md, include a log entry to append. For all other files, output the complete file content.",
+    "For wiki/log.md, include a log entry to append. For wiki/index.md, output ONLY the new entries under their `## Section` / `### Subsection` headings; the application appends them. For all other files, output the complete file content.",
     "Use relative paths from the project root (e.g., wiki/sources/topic.md).",
     "Do not include any other text outside the FILE blocks.",
   ]
@@ -2986,6 +3068,9 @@ export async function executeIngestWrites(
           ? `${existing}\n\n${content.trim()}`
           : content.trim()
         await writeFile(fullPath, appended)
+      } else if (isIndexPath(relativePath)) {
+        const existing = await tryReadFile(fullPath)
+        await writeFile(fullPath, mergeIndexEntries(existing || "", content).content)
       } else {
         await writeFile(fullPath, content)
       }
