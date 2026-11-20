@@ -363,3 +363,138 @@ describe("ingest scenarios (fixture-driven)", () => {
     expect(projectB).toContain("analysis for project B")
   })
 })
+
+it("rejects a truncated generation before writing pages or a success cache", async () => {
+  ctx = await setup(ingestScenarios[0])
+  pendingResponses = [
+    "A complete analysis.",
+    "---FILE: wiki/sources/partial.md---\n---\ntype: source\n---\n# Partial\n---END FILE---\n---FILE: wiki/concepts/cut.md---\nAn interrupted sentence",
+  ]
+  await expect(autoIngest(
+    ctx.tmp.path,
+    path.join(ctx.tmp.path, ingestScenarios[0].source.path),
+    useWikiStore.getState().llmConfig,
+  )).rejects.toThrow(/incomplete|truncat/i)
+  expect(await fileExists(`${ctx.tmp.path}/.llm-wiki/ingest-cache.json`)).toBe(false)
+  expect(await fileExists(`${ctx.tmp.path}/wiki/sources/partial.md`)).toBe(false)
+
+  const debugDir = `${ctx.tmp.path}/.llm-wiki/ingest-debug`
+  const dumps = await fs.readdir(debugDir)
+  expect(dumps).toHaveLength(1)
+  const dump = await readFileRaw(`${debugDir}/${dumps[0]}`)
+  expect(dump).toContain("An interrupted sentence")
+  expect(dump).toContain('FILE block "wiki/concepts/cut.md" was not closed')
+})
+
+it("does not cache a partial ingest when aggregate repair is truncated", async () => {
+  ctx = await setup(ingestScenarios[0])
+  pendingResponses = [
+    "A complete analysis.",
+    "---FILE: wiki/sources/rope-paper.md---\n---\ntype: source\ntitle: RoPE\nsources: [rope-paper.md]\n---\n# RoPE\nA complete source summary.\n---END FILE---",
+    "---FILE: wiki/index.md---\n# Index\nAn interrupted entry",
+  ]
+  await expect(autoIngest(
+    ctx.tmp.path,
+    path.join(ctx.tmp.path, ingestScenarios[0].source.path),
+    useWikiStore.getState().llmConfig,
+  )).rejects.toThrow(/incomplete/i)
+  expect(await fileExists(`${ctx.tmp.path}/.llm-wiki/ingest-cache.json`)).toBe(false)
+})
+
+it("merges index entries into the existing index and leaves overview untouched", async () => {
+  ctx = { tmp: await createTempProject("ingest-index-merge") }
+  const projectPath = ctx.tmp.path
+  const existingIndex = [
+    "# Wiki Index",
+    "",
+    "## Concepts",
+    "",
+    "### 도어",
+    "",
+    "- [[슬라이딩-도어]] — 기존 항목",
+    "",
+  ].join("\n")
+  const existingOverview = "# Overview\n\n기존 개요 문단.\n"
+  await writeFileRaw(`${projectPath}/schema.md`, "")
+  await writeFileRaw(`${projectPath}/purpose.md`, "")
+  await writeFileRaw(`${projectPath}/wiki/index.md`, existingIndex)
+  await writeFileRaw(`${projectPath}/wiki/overview.md`, existingOverview)
+  await writeFileRaw(`${projectPath}/raw/sources/door.md`, "포켓 도어 설명\n")
+
+  useWikiStore.setState({
+    project: {
+      name: "t",
+      path: projectPath,
+      createdAt: 0,
+      purposeText: "",
+      fileTree: [],
+    } as unknown as ReturnType<typeof useWikiStore.getState>["project"],
+  })
+  useWikiStore.getState().setLlmConfig({
+    provider: "openai",
+    apiKey: "test-key",
+    model: "gpt-4",
+    ollamaUrl: "",
+    customEndpoint: "",
+    maxContextSize: 128000,
+  })
+
+  pendingResponses = [
+    "analysis",
+    [
+      "---FILE: wiki/sources/door.md---",
+      "---",
+      "type: source",
+      "title: \"Source: door.md\"",
+      "sources: [door.md]",
+      "tags: []",
+      "related: []",
+      "---",
+      "",
+      "# Source: door.md",
+      "---END FILE---",
+      "",
+      "---FILE: wiki/index.md---",
+      "## Concepts",
+      "### 도어",
+      "- [[포켓-도어]] — 새 항목",
+      "- [[슬라이딩-도어]] — 중복이라 무시",
+      "---END FILE---",
+      "",
+      "---FILE: wiki/log.md---",
+      "## [2026-11-20] ingest | door",
+      "---END FILE---",
+      "",
+      "---FILE: wiki/overview.md---",
+      "# Overview",
+      "",
+      "모델이 새로 쓴 개요.",
+      "---END FILE---",
+    ].join("\n"),
+  ]
+
+  await autoIngest(projectPath, `${projectPath}/raw/sources/door.md`, useWikiStore.getState().llmConfig)
+
+  const index = await readFileRaw(`${projectPath}/wiki/index.md`)
+  expect(index).toContain("- [[슬라이딩-도어]] — 기존 항목")
+  expect(index).toContain("- [[포켓-도어]] — 새 항목")
+  expect(index).not.toContain("중복이라 무시")
+  expect(index.indexOf("[[포켓-도어]]")).toBeGreaterThan(index.indexOf("[[슬라이딩-도어]]"))
+  expect(await readFileRaw(`${projectPath}/wiki/overview.md`)).toBe(existingOverview)
+  expect(pendingResponses).toHaveLength(0)
+})
+
+it("gives the analysis stage enough output budget for a Korean analysis", async () => {
+  const { streamChat } = await import("./llm-client")
+  const mocked = vi.mocked(streamChat)
+  mocked.mockClear()
+  ctx = await setup(ingestScenarios[0])
+  pendingResponses = ["analysis", ""]
+  await autoIngest(
+    ctx.tmp.path,
+    path.join(ctx.tmp.path, ingestScenarios[0].source.path),
+    useWikiStore.getState().llmConfig,
+  ).catch(() => undefined)
+  const analysisOverrides = mocked.mock.calls[0]?.[4] as { max_tokens?: number } | undefined
+  expect(analysisOverrides?.max_tokens).toBe(16_384)
+})

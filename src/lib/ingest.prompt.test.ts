@@ -205,3 +205,14 @@ describe("long-source ingest planning", () => {
     expect(chunks[1].main.startsWith(chunks[0].main.slice(-200))).toBe(false)
   })
 })
+
+describe("buildGenerationPrompt aggregate output size", () => {
+  it("asks for new index entries only and never for a rewritten overview", () => {
+    const prompt = buildGenerationPrompt("schema", "purpose", "# Index\n- [[a]]", "source.pdf", "# Overview")
+
+    expect(prompt).toMatch(/ONLY the new entries/i)
+    expect(prompt).not.toMatch(/preserve all existing entries/i)
+    expect(prompt).not.toMatch(/An updated wiki\/overview\.md/)
+    expect(prompt).toMatch(/Do NOT output a wiki\/overview\.md block/)
+  })
+})

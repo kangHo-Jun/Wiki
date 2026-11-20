@@ -112,13 +112,20 @@ describe("source summary media refs", () => {
 describe("aggregate repair targeting", () => {
   it("requests missing aggregate pages and aggregate pages dropped by truncation warnings", () => {
     expect(aggregatePathsNeedingRepair(
-      ["wiki/index.md", "wiki/log.md"],
-      ['FILE block "wiki/overview.md" was not closed before end of stream — likely truncation.'],
-    )).toEqual(["wiki/overview.md"])
+      ["wiki/log.md"],
+      ['FILE block "wiki/index.md" was not closed before end of stream — likely truncation.'],
+    )).toEqual(["wiki/index.md"])
 
     expect(aggregatePathsNeedingRepair(
-      ["wiki/index.md", "wiki/overview.md", "wiki/log.md"],
+      ["wiki/index.md", "wiki/log.md"],
       [],
+    )).toEqual([])
+  })
+
+  it("never asks to regenerate overview.md during ingest", () => {
+    expect(aggregatePathsNeedingRepair(
+      ["wiki/index.md", "wiki/log.md"],
+      ['FILE block "wiki/overview.md" was not closed before end of stream — likely truncation.'],
     )).toEqual([])
   })
 
