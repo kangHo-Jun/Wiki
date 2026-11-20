@@ -1,3 +1,24 @@
+## 2026-11-20 인제스트 목차 append 방식 수정 (코드 수정·테스트 통과, 앱 미반영·미커밋)
+
+- 새 `src/lib/index-merge.ts`(`mergeIndexEntries`): 모델이 낸 새 항목만 기존 `index.md`의 같은 `##`/`###` 아래에 삽입, `[[대상]]` 중복은 건너뜀, 없는 섹션은 생성, 전체 목차를 그대로 내면 변화 없음.
+- `ingest.ts`: 생성 프롬프트는 index 새 항목만 요청하고 overview 출력 금지. index 쓰기는 병합(자동·채팅형 두 경로 모두). overview 블록은 무시(경고만). `AGGREGATE_WIKI_PATHS`에서 overview 제외, repair 프롬프트도 index 새 항목만, index repair 크기 제한 해제. 잘린 overview 블록은 실패 사유에서 제외.
+- 테스트: 신규 `index-merge.test.ts` 8개, 시나리오 1개(병합·overview 불변), 프롬프트 1개, aggregate 기대값 갱신. ingest 관련 5파일 94개 통과, `tsc --noEmit` 통과. `vitest run src`의 나머지 실패는 `src-tauri/target` 빌드 산출물과 `llm-client.real-llm.test.ts`(로컬 서버 CORS, 변경 무관).
+- 11/20 14:28 release 재빌드(LTO off, `--bundles app`) 후 `/Applications/LLM Wiki.app` 교체. 새 binary SHA256 앞 16자 `aee9ddd63b35085b`. 이전 앱(`4b7cb44b…`) 백업 `~/LLMWiki-격리/app-backup-2026-11-20/`. 재실행 후 현재 프로젝트 `~/LLMWiki/daesan-wiki-sync`(ID 8831…) 확인. 첫 빌드는 `tsc --build`의 미사용 매개변수 오류로 실패 → `_index`로 수정.
+- 1차 재시험(100차-검토제외): MAX_TOKENS는 사라졌으나 `Incomplete generation: missing or truncated FILE blocks`(정상 종료인데 FILE 블록 미종결)로 실패·재시도. 원문 미보존으로 원인 미확정.
+- 진단용 추가: 미종결 블록으로 거부되면 모델 원문+파서 경고를 `<프로젝트>/.llm-wiki/ingest-debug/<시각>-<파일>.txt`에 저장(`saveIngestDebugDump`, 실패해도 흐름 무영향, 시나리오 테스트 추가). 14:42 재빌드·교체, binary SHA256 앞 16자 `d638a88e3e5ca9d3`, 현재 프로젝트 새 경로 확인.
+- **실제 Gemini 성공 확인**: 100차-검토제외 재시도가 14:36 완료(1차 수정 빌드). 8파일(source 1, concept 5, index, log). index 86,997→87,406바이트, 기존 줄 삭제 0·추가 5(`### 기타` 섹션 끝), overview 미변경(11/2), 캐시 등록. 이후 재큐는 "Skipped (unchanged)". 첫 시도의 미종결 블록 실패 원인은 원문 없이 미확정(재발 시 ingest-debug로 확인).
+- 11차 지식정리: `Analysis failed: MAX_TOKENS`(분석 단계 출력 한도 4,096 고정, `ingest.ts` 분석 호출) 2회 후 재시도 성공. 12차도 성공(각 8파일). 누적 index 삭제 0·추가 14줄, overview 미변경.
+- 수정: `INGEST_ANALYSIS_MAX_TOKENS=16_384`, `INGEST_CHUNK_ANALYSIS_MAX_TOKENS=8_192`(분석문은 위키에 저장 안 되는 생성 참고용). 테스트 1개 추가, ingest 5파일 95개 통과, `tsc --build` 0 오류. 15:07 재빌드·교체, binary SHA256 앞 16자 `fe18601022e7ad34`, 현재 프로젝트 새 경로 확인.
+- 남은 것: 새 빌드로 지식정리 몇 개 재시험(분석 재시도 사라졌는지), 분류 배치 품질(`### 기타` 쏠림) 판단, 커밋. overview는 이제 인제스트로 갱신되지 않으므로 별도 갱신 수단이 필요하면 추가 작업.
+
+## 2026-11-20 도어조사 인제스트 실패 진단 (MAX_TOKENS, 수정 없음)
+
+- 증상: 도어조사 10개 큐(100~108차) 중 100·101차가 `Gemini response incomplete: finishReason=MAX_TOKENS`로 실패·재시도 반복 → 사용자가 Cancel all. 완료 0, 위키 변경 0.
+- 원인1(설계): 생성 프롬프트(`ingest.ts:1857`, repair `:2071`)가 파일마다 `wiki/index.md`·`overview.md` **전체 재출력**을 요구. index 40,575자(한글 2.2만)≈2만~2.8만 토큰, overview≈0.5만~0.8만 토큰(로컬 추정, countTokens 호출은 권한 거부로 미실행). 출력 한도 32,768(`INGEST_GENERATION_TOKENS_512K`, 컨텍스트 1M 설정) 안에 새 페이지까지 넣을 수 없음. 원본이 844바이트인 101차도 실패 → 원본 크기 무관.
+- 원인2(11/2 로컬 변경, 미커밋): `llm-client.ts` Gemini STOP 외 종료 오류화 + `ingest.ts` 미종결 FILE 블록 시 전체 실패. 설치본 빌드 11/2 17:46. 이전에는 같은 절단(HANDOFF 기존 기록: source·index 블록 미종결 경고)이 부분 성공으로 지나갔음.
+- 원인3: aggregate repair 단계 출력 한도 8,192(`computeIngestReviewMaxTokens`)라 2만+ 토큰 index 재작성 불가.
+- 수정 후보(미실행): ① index는 새 항목만 출력시키고 코드가 병합(log.md 방식), overview는 매 인제스트 갱신 중단·주기 재생성 ② 임시: 생성 한도 상향(모델 상한 약 65K) — 비용·시간 증가, index 성장 시 재발.
+
 ## 2026-11-20 위키 로컬 이동 완료 (검색 지연 해결)
 
 - 프로젝트 위치: `~/LLMWiki/daesan-wiki-sync` (로컬). 옛 Synology 폴더는 더 이상 프로젝트가 아님. 프로젝트 ID `8831a625-…` 유지.
